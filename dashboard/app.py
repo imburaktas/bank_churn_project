@@ -9,7 +9,6 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import os
 
 # Page config
@@ -19,26 +18,92 @@ st.set_page_config(
     layout="wide"
 )
 
-# Get paths
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
-
-# Load data
+# Load data - Fixed paths for Streamlit Cloud
 @st.cache_data
 def load_data():
-    df = pd.read_csv(os.path.join(PROJECT_DIR, 'data/processed_churn_data.csv'))
-    kpi = pd.read_csv(os.path.join(PROJECT_DIR, 'data/kpi_summary.csv'))
-    return df, kpi.iloc[0]
+    # Try multiple path options for flexibility
+    possible_paths = [
+        'data/processed_churn_data.csv',
+        '../data/processed_churn_data.csv',
+        'bank_churn_project/data/processed_churn_data.csv',
+    ]
+    
+    df = None
+    for path in possible_paths:
+        try:
+            df = pd.read_csv(path)
+            break
+        except:
+            continue
+    
+    if df is None:
+        # If no processed data, load raw and process
+        raw_paths = [
+            'data/raw/Customer-Churn-Records.csv',
+            '../data/raw/Customer-Churn-Records.csv',
+            'bank_churn_project/data/raw/Customer-Churn-Records.csv',
+        ]
+        for path in raw_paths:
+            try:
+                df = pd.read_csv(path)
+                # Process the data
+                df = df.drop(['RowNumber', 'CustomerId', 'Surname'], axis=1, errors='ignore')
+                df = df.rename(columns={
+                    'Exited': 'Churned',
+                    'Complain': 'HasComplaint',
+                    'Satisfaction Score': 'SatisfactionScore',
+                    'Card Type': 'CardType',
+                    'Point Earned': 'PointsEarned'
+                })
+                df['AgeGroup'] = pd.cut(df['Age'], bins=[0, 30, 40, 50, 60, 100], 
+                                        labels=['18-30', '31-40', '41-50', '51-60', '60+'])
+                df['BalanceSegment'] = pd.qcut(df['Balance'].replace(0, np.nan), 
+                                                q=4, labels=['Low', 'Medium', 'High', 'Premium'],
+                                                duplicates='drop')
+                df['BalanceSegment'] = df['BalanceSegment'].cat.add_categories(['Zero'])
+                df.loc[df['Balance'] == 0, 'BalanceSegment'] = 'Zero'
+                df['CreditSegment'] = pd.cut(df['CreditScore'], 
+                                              bins=[0, 580, 670, 740, 800, 900],
+                                              labels=['Poor', 'Fair', 'Good', 'Very Good', 'Excellent'])
+                df['TenureSegment'] = pd.cut(df['Tenure'], 
+                                              bins=[-1, 2, 5, 8, 10],
+                                              labels=['New (0-2)', 'Growing (3-5)', 'Mature (6-8)', 'Loyal (9-10)'])
+                break
+            except:
+                continue
+    
+    if df is None:
+        raise FileNotFoundError("Could not load data from any path")
+    
+    # Calculate KPI
+    churn_rate = df['Churned'].mean() * 100
+    churned_balance = df[df['Churned']==1]['Balance'].sum()
+    
+    kpi = pd.Series({
+        'total_customers': len(df),
+        'churn_rate': churn_rate,
+        'retention_rate': 100 - churn_rate,
+        'avg_balance': df['Balance'].mean(),
+        'avg_credit_score': df['CreditScore'].mean(),
+        'avg_tenure': df['Tenure'].mean(),
+        'active_member_rate': df['IsActiveMember'].mean() * 100,
+        'complaint_rate': df['HasComplaint'].mean() * 100,
+        'balance_at_risk': churned_balance
+    })
+    
+    return df, kpi
 
 try:
     df, kpi = load_data()
     data_loaded = True
 except Exception as e:
     st.error(f"Error loading data: {e}")
+    st.info("Please make sure the data files are in the correct location.")
     data_loaded = False
 
 # Header
 st.title("🏦 Bank Customer Churn Analysis")
+st.markdown("*A Data Analyst Portfolio Project*")
 st.markdown("---")
 
 if not data_loaded:
@@ -278,21 +343,22 @@ elif page == "Risk Analysis":
     st.subheader("High Risk Customer Profile")
     
     # Calculate risk score
-    df['RiskScore'] = 0
-    df.loc[df['HasComplaint'] == 1, 'RiskScore'] += 40
-    df.loc[df['IsActiveMember'] == 0, 'RiskScore'] += 20
-    df.loc[df['Geography'] == 'Germany', 'RiskScore'] += 15
-    df.loc[df['NumOfProducts'].isin([1, 3, 4]), 'RiskScore'] += 15
-    df.loc[df['Age'] > 50, 'RiskScore'] += 10
+    df_risk = df.copy()
+    df_risk['RiskScore'] = 0
+    df_risk.loc[df_risk['HasComplaint'] == 1, 'RiskScore'] += 40
+    df_risk.loc[df_risk['IsActiveMember'] == 0, 'RiskScore'] += 20
+    df_risk.loc[df_risk['Geography'] == 'Germany', 'RiskScore'] += 15
+    df_risk.loc[df_risk['NumOfProducts'].isin([1, 3, 4]), 'RiskScore'] += 15
+    df_risk.loc[df_risk['Age'] > 50, 'RiskScore'] += 10
     
-    df['RiskLevel'] = pd.cut(df['RiskScore'], bins=[-1, 20, 40, 60, 100],
+    df_risk['RiskLevel'] = pd.cut(df_risk['RiskScore'], bins=[-1, 20, 40, 60, 100],
                              labels=['Low', 'Medium', 'High', 'Critical'])
     
     # Risk distribution
     col1, col2 = st.columns(2)
     
     with col1:
-        risk_dist = df['RiskLevel'].value_counts().reset_index()
+        risk_dist = df_risk['RiskLevel'].value_counts().reset_index()
         risk_dist.columns = ['RiskLevel', 'Count']
         
         fig = px.pie(risk_dist, values='Count', names='RiskLevel',
@@ -304,7 +370,7 @@ elif page == "Risk Analysis":
     
     with col2:
         # Churn rate by risk level
-        risk_churn = df.groupby('RiskLevel')['Churned'].agg(['count', 'mean']).reset_index()
+        risk_churn = df_risk.groupby('RiskLevel')['Churned'].agg(['count', 'mean']).reset_index()
         risk_churn.columns = ['RiskLevel', 'Count', 'ChurnRate']
         risk_churn['ChurnRate'] = risk_churn['ChurnRate'] * 100
         
@@ -319,13 +385,9 @@ elif page == "Risk Analysis":
     
     # Balance at risk
     st.markdown("---")
-    st.subheader("💰 Balance at Risk by Segment")
+    st.subheader("💰 Balance at Risk by Risk Level")
     
-    risk_balance = df.groupby('RiskLevel').agg({
-        'Balance': 'sum',
-        'Churned': 'sum'
-    }).reset_index()
-    risk_balance['ChurnedBalance'] = df[df['Churned']==1].groupby('RiskLevel')['Balance'].sum().values
+    risk_balance = df_risk.groupby('RiskLevel')['Balance'].sum().reset_index()
     
     fig = px.bar(risk_balance, x='RiskLevel', y='Balance',
                  color='RiskLevel',
@@ -359,7 +421,6 @@ elif page == "Recommendations":
         - Set SLA for complaint resolution (24-48 hours)
         - Create dedicated retention team for complainants
         - Proactive follow-up after complaint resolution
-        - Compensation program for valid complaints
         
         **Expected Impact:** High
         """)
@@ -374,7 +435,6 @@ elif page == "Recommendations":
         - Analyze competitor offerings
         - Review pricing and fee structure
         - Localize customer service
-        - Consider product customization
         
         **Expected Impact:** Medium-High
         """)
@@ -390,7 +450,6 @@ elif page == "Recommendations":
         - Simplify product portfolio
         - Improve cross-sell targeting
         - Create value-added bundles
-        - Reduce complexity for customers
         
         **Expected Impact:** Medium
         """)
@@ -405,38 +464,10 @@ elif page == "Recommendations":
         - Gamification and rewards program
         - Personalized offers based on behavior
         - Regular touchpoints and communications
-        - Mobile app engagement features
         
         **Expected Impact:** Medium
         """)
-    
-    st.markdown("---")
-    
-    # Priority matrix
-    st.subheader("📊 Priority Matrix")
-    
-    priority_data = pd.DataFrame({
-        'Initiative': ['Complaint Management', 'Germany Strategy', 'Product Optimization', 'Activation Campaigns', 'Age-based Programs'],
-        'Impact': [95, 70, 60, 55, 45],
-        'Effort': [40, 70, 50, 45, 35],
-        'Priority': ['Critical', 'High', 'Medium', 'Medium', 'Low']
-    })
-    
-    fig = px.scatter(priority_data, x='Effort', y='Impact', 
-                     color='Priority', size=[40, 35, 30, 30, 25],
-                     text='Initiative',
-                     color_discrete_map={'Critical': '#e74c3c', 'High': '#f39c12', 
-                                        'Medium': '#3498db', 'Low': '#2ecc71'})
-    fig.update_traces(textposition='top center')
-    fig.update_layout(xaxis_title="Implementation Effort", yaxis_title="Business Impact",
-                     xaxis=dict(range=[0, 100]), yaxis=dict(range=[0, 100]))
-    
-    # Add quadrant lines
-    fig.add_hline(y=50, line_dash="dash", line_color="gray", opacity=0.5)
-    fig.add_vline(x=50, line_dash="dash", line_color="gray", opacity=0.5)
-    
-    st.plotly_chart(fig, use_container_width=True)
 
 # Footer
 st.markdown("---")
-st.markdown("*Bank Customer Churn Analysis | Data Analyst Portfolio Project*")
+st.markdown("*Bank Customer Churn Analysis | Built by Burak Aktaş | [GitHub](https://github.com/imburaktas)*")
