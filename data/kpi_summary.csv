@@ -1,0 +1,2 @@
+total_customers,churn_rate,retention_rate,avg_balance,avg_credit_score,avg_tenure,active_member_rate,complaint_rate,balance_at_risk
+10000,20.380000000000003,79.62,76485.889288,650.5288,5.0128,51.51,20.44,185681112.1
